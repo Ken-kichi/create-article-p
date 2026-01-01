@@ -1,21 +1,46 @@
-$("#run").click(function() {
-    const theme = $("#theme").val();
-    if (theme){
-        alert("Selected theme: " + theme);
-        return;
-    }
+$(function () {
+  const socket = io();
+  const $start = $("#start");
+  const $spinner = $("#spinner");
 
-    $("#result").text("Generating...");
-    $.ajax({
-        url: "/generate",
-        method: "POST",
-        contentType: "application/json",
-        data: JSON.stringify({ theme }),
-        success: function(res){
-            $("#result").text(res.article);
-        },
-        error:function(err){
-            $("#result").text("Error: " + err.responseText);
-        }
-    })
+  function setLoading(isLoading) {
+    if (isLoading) {
+      $spinner.removeClass("d-none");
+      $start.prop("disabled", true);
+    } else {
+      $spinner.addClass("d-none");
+      $start.prop("disabled", false);
+    }
+  }
+
+  $("#start").click(function () {
+    $("#log").empty();
+    $("#article").text("");
+    setLoading(true);
+
+    socket.emit("start", {
+      theme: $("#theme").val()
+    });
+  });
+
+  socket.on("progress", function (data) {
+    $("#log").append(
+      `<li class="list-group-item">${data.msg}</li>`
+    );
+  });
+
+  socket.on("done", function (data) {
+    $("#log").append(
+      `<li class="list-group-item list-group-item-success">完了</li>`
+    );
+    $("#article").text(data.article);
+    setLoading(false);
+  });
+
+  socket.on("failed", function (data) {
+    $("#log").append(
+      `<li class="list-group-item list-group-item-danger">${data.message}</li>`
+    );
+    setLoading(false);
+  });
 });
