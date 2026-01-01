@@ -13,4 +13,36 @@
 ## graph.py
 
 ## app.py
-main.py -> app.py
+main.pyをapp.pyに変更
+
+
+## インフラの構築
+### リソースグループ
+（リソースグループの説明）
+
+（作成手順）
+リソースグループの作成
+グループ名：create-article
+リージョン：Japan West
+### Azure AI Foundry
+#### Azure AI Foundry resource
+Azure ポータルの検索欄でai foundryを検索
+Foundry resource
+name:article-ai
+rigion:East US
+default project name:article-ai
+#### モデルをデプロイ
+gpt-5.1-chatとgpt-5-miniをデプロイ
+（作成手順）
+### App Service
+（作成手順）
+
+## ローカルテスト
+
+## デプロイ
+
+.envの作成
+環境変数ファイルを作成し、OPENAIの
+```bash
+touch .env
+```
