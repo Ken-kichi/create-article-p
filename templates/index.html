@@ -13,7 +13,15 @@
         <h1 class="mb-4">AI記事生成ツール</h1>
 
         <div class="mb-3">
-            <textarea id="theme" class="form-control" placeholder="テーマを入力"></textarea>
+            <label for="theme" class="form-label">テーマ入力ガイド</label>
+            <textarea id="theme" class="form-control" rows="6">
+            1. 最初に伝えたいことは？（例：Pythonの歴史を知ると学習が楽になる）
+            2. 本文で説明したい出来事は？（例：作者、代表バージョン、学んだこと）
+            3. 具体例や体験談は？（例：初学者時代のエピソード）
+            4. 書くときに気をつけたいことは？（例：語尾を揃えない、数字を入れる）
+            5. 読み終わった人にしてほしい行動は？（例：note購読、質問コメント）
+            </textarea>
+            <small class="form-text text-muted">思いついた項目だけで構いません。箇条書きでラフに入力すれば十分です。</small>
         </div>
 
         <button id="start" class="btn btn-primary">
@@ -23,12 +31,26 @@
             <span class="visually-hidden">Loading...</span>
         </button>
 
+        <div class="mt-4">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <h5 class="mb-0">進捗率</h5>
+                <span id="progress-label">0%</span>
+            </div>
+            <div class="progress">
+                <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%" aria-valuenow="0"
+                    aria-valuemin="0" aria-valuemax="100">0%</div>
+            </div>
+        </div>
+
         <hr>
 
         <h5>進捗</h5>
         <ul id="log" class="list-group mb-3"></ul>
 
-        <h5>完成記事</h5>
+        <div class="d-flex align-items-center mb-2">
+            <h5 class="mb-0">完成記事</h5>
+            <button id="copy-article" class="btn btn-outline-secondary btn-sm ms-3" disabled>コピー</button>
+        </div>
         <pre id="article" class="p-3 bg-white border"></pre>
     </div>
 

@@ -13,6 +13,7 @@ NODE_LABELS = {
     "diagram": "図解生成",
     "merge": "記事統合",
 }
+TOTAL_STEPS = len(NODE_LABELS)
 
 
 @app.route('/')
@@ -33,7 +34,9 @@ def start(data):
         "article": ""
     }
 
-    emit("progress", {"msg": "生成を開始しました"})
+    completed_nodes = set()
+
+    emit("progress", {"msg": "生成を開始しました", "percent": 0})
 
     final_state = None
     try:
@@ -42,16 +45,20 @@ def start(data):
                 for node_name in payload.keys():
                     if node_name == "__metadata__":
                         continue
+                    if node_name in NODE_LABELS:
+                        completed_nodes.add(node_name)
                     label = NODE_LABELS.get(node_name, node_name)
-                    emit("progress", {"msg": f"{label}が完了しました"})
+                    percent = int(len(completed_nodes) / TOTAL_STEPS * 100) if TOTAL_STEPS else 100
+                    emit("progress", {"msg": f"{label}が完了しました", "percent": percent})
             elif mode == "values":
                 final_state = payload
 
         article = (final_state or {}).get("article", "")
-        emit("done", {"article": article})
+        emit("done", {"article": article, "percent": 100})
     except Exception as exc:
         app.logger.exception("Article generation failed")
-        emit("progress", {"msg": f"エラー: {exc}"})
+        percent = int(len(completed_nodes) / TOTAL_STEPS * 100) if TOTAL_STEPS else 0
+        emit("progress", {"msg": f"エラー: {exc}", "percent": percent})
         emit("failed", {"message": "記事生成中にエラーが発生しました。"})
 
 

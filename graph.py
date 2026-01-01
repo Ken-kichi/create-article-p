@@ -88,11 +88,18 @@ def generate_draft(state: ArticleState) -> dict:
         content=f"""
         「{state['theme']}」というテーマで、有料note向けの草稿を作成してください。
 
-        【アウトライン要件】
-        - 3〜4個の大見出し（##）を含め、それぞれ300文字以上で具体的に書く
-        - 導入では「誰に何の価値があるか」「今読む理由」を短く提示する
-        - 少なくとも1つのタイムライン、1つの事例、1つの実践アドバイスを含める
-        - セクション名は内容を的確に表す日本語タイトルにし、「見出し1」等は禁止
+        【構成要件】
+        - 「書き出し」「本文」「まとめ」の3部構成（## 見出し）を必須とする
+        - 書き出し：ベネフィット提示＋PREP法の結論を最初に述べる
+        - 本文：準備/心構え→記事構成→論理的なPREP活用→6つ以上のライティングTips（接続詞・文末・無駄語排除・遠回し回避・漢字ひらがなバランス・校正）の順で詳述し、箇条書きや番号を混在させる
+        - まとめ：本文の要点を再結論し、次のアクションを明示する
+
+        【執筆ルール】
+        - 300文字以上の段落を確保しつつ、PREP法（結論→理由→具体例→再結論）をパラグラフ単位で適用
+        - 同じ接続詞や文末の連続を避け、必要に応じて代替語を使う
+        - 「という」「こと」「こそあど」「遠回し表現」は最小化し、数字・具体例を積極的に入れる
+        - 読者が手元で再現できるチェックリストを挿入する
+        - セクション名は内容を要約した日本語タイトルにし、「見出し1」等は禁止
 
         【トーン】
         - 読者目線で親しみやすく、しかし専門家としての確信を持つ語り口
@@ -113,7 +120,7 @@ def split_sections(state: ArticleState) -> dict:
     以下の記事を見出し単位で分割してください。
 
     【制約】
-    - 見出しは最大3つ
+    - 「書き出し」「本文」「まとめ」の3つのキーを必ず出力する
     - 出力はJSONのみ
     - 説明文は禁止
     - 見出し名は内容を要約した日本語タイトル（10文字以上）にする
@@ -121,8 +128,9 @@ def split_sections(state: ArticleState) -> dict:
 
     形式:
     {{
-    "見出し1": "本文",
-    "見出し2": "本文"
+    "書き出し": "本文",
+    "本文": "本文",
+    "まとめ": "本文"
     }}
 
     記事:
@@ -173,7 +181,11 @@ def generate_diagrams(state: ArticleState) -> dict:
 
 
 def merge_article(state: ArticleState) -> dict:
-    sections = list(state["sections"].items())
+    order = ["書き出し", "本文", "まとめ"]
+    sections = sorted(
+        state["sections"].items(),
+        key=lambda item: order.index(item[0]) if item[0] in order else len(order),
+    )
     if not sections:
         return {"article": ""}
 
@@ -187,6 +199,7 @@ def merge_article(state: ArticleState) -> dict:
     ]
 
     free_title, free_body = sections[0]
+    free_title = "書き出し：読者のベネフィット" if "書き出し" in free_title else free_title
     parts.append(f"### {free_title}")
     parts.append(free_body)
     if free_title in diagrams:
@@ -201,10 +214,14 @@ def merge_article(state: ArticleState) -> dict:
             [
                 "---",
                 "## ここから先は有料エリア（購読者限定）",
-                "設計思想の背景、歴史的な転換点ごとの意思決定、現場への落とし込み方を実務レベルで解説します。",
+                "本文パートでは準備・心構えから論理展開、15個の執筆コツまで体系的に深掘りし、最後にまとめで次のアクションを提示します。",
             ]
         )
         for title, body in premium_sections:
+            if "本文" in title:
+                title = "本文：準備→論理構成→ライティングコツ"
+            elif "まとめ" in title:
+                title = "まとめ：PREP再結論と次アクション"
             parts.append(f"### {title}")
             parts.append(body)
             if title in diagrams:
