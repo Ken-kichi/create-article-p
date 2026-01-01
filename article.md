@@ -5,7 +5,7 @@
 ~/Desktop/create-article $ uv init
 ~/Desktop/create-article $ uv venv
 ~/Desktop/create-article $ source ./.venv/bin/activate
-~/Desktop/create-article $ uv add langchain langgraph openai tiktoken langchain_openai dotenv
+~/Desktop/create-article $ uv add langchain langgraph openai tiktoken langchain_openai dotenv flask
 (create-article) ~/Desktop/create-article $ uv pip compile ./pyproject.toml > requirements.txt
 
 ```
