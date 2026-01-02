@@ -32,7 +32,7 @@ $(function () {
 
   $("#start").click(function () {
     $("#log").empty();
-    $article.text("");
+    $article.val("");
     setLoading(true);
     updateProgress(0);
     setCopyEnabled(false);
@@ -55,7 +55,7 @@ $(function () {
     $("#log").append(
       `<li class="list-group-item list-group-item-success">完了</li>`
     );
-    $article.text(data.article);
+    $article.val(data.article ?? "");
     setLoading(false);
     updateProgress(data.percent ?? 100);
     setCopyEnabled(Boolean(data.article));
@@ -69,7 +69,7 @@ $(function () {
   });
 
   $copyButton.click(async function () {
-    const text = $article.text().trim();
+    const text = ($article.val() || "").trim();
     if (!text) {
       return;
     }

@@ -10,8 +10,10 @@ NODE_LABELS = {
     "draft": "下書き作成",
     "split": "見出し分割",
     "fact": "ファクトチェック",
+    "revise": "指摘反映",
     "diagram": "図解生成",
     "merge": "記事統合",
+    "title": "SEOタイトル生成",
 }
 TOTAL_STEPS = len(NODE_LABELS)
 
@@ -31,7 +33,8 @@ def start(data):
         "sections": {},
         "notes": {},
         "diagrams": {},
-        "article": ""
+        "article": "",
+        "seo_title": ""
     }
 
     completed_nodes = set()
