@@ -219,7 +219,10 @@ def merge_article(state: ArticleState) -> dict:
         return {"article": ""}
 
     diagrams = state.get("diagrams", {})
-    parts = []
+    parts = [
+        f"# {state['theme']}：有料noteで読む価値",
+        "ここでは代表読者の課題と感情を共有しつつ、『考え方』だけでは解けない疑問を残します。具体的な数値・手順・テンプレートは有料エリアで開示します。",
+    ]
 
     free_title, free_body = sections[0]
     free_display = "書き出し：読者のベネフィット" if "書き出し" in free_title else free_title
@@ -236,6 +239,7 @@ def merge_article(state: ArticleState) -> dict:
             [
                 "---",
                 "## ここから先は有料エリア（購読者限定）",
+                f"ここまでは考え方、ここからは数字と手順。無料パートで残した問いに、実データと再現可能なテンプレで答えます。",
             ]
         )
         for title, body in premium_sections:
@@ -250,6 +254,30 @@ def merge_article(state: ArticleState) -> dict:
                 parts.append("```mermaid")
                 parts.append(diagrams[original_title])
                 parts.append("```")
+
+        parts.extend(
+            [
+                "### 今日すぐ試せる一歩",
+                "1. 有料パートで示した手順のうち、最も簡単な工程を今日中に1回だけ試してください。完璧なCSVではなく、3項目だけのメモで十分です。",
+                "2. 実施前後の数値（体調・指標など）を同じ条件で記録し、48時間以内に差分を確認してください。",
+                "3. 差分を有料パートで配布するテンプレートに入力し、次の改善サイクルに備えてください。",
+                "### 付録：購読者限定の具体物",
+                "- 進捗ログを自動集計するスプレッドシート（入力は3項目・1分で完了、毎週の報告準備を平均30分短縮）",
+                "- 失敗パターン別リカバリ手順PDF（想定外のトラブルを最大3回まで先回りで回避）",
+                "- ケーススタディ動画リンク（約15分、行動前後の思考整理を一発で学べます）",
+            ]
+        )
+
+    parts.extend(
+        [
+            "## 読者が得られるもの",
+            "- 主テーマに絞った一次体験と第三者データのセットで再現性を判断できること",
+            "- すぐに記入できるチェックリストとログテンプレートが手に入ること",
+            "- ありがちな失敗とリカバリ策を事前に把握し、意思決定の速度を上げられること",
+            "## 次のアクション",
+            "どの項目で詰まったか（データ取得/テンプレ活用/リカバリ）だけコメントで教えてください。必要なデータやテンプレを優先的に追加します。",
+        ]
+    )
 
     article_body = "\n\n".join(parts)
     return {"article": _sanitize_article(article_body)}
