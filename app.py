@@ -20,11 +20,13 @@ TOTAL_STEPS = len(NODE_LABELS)
 
 @app.route('/')
 def index():
+    """トップページを描画し、記事生成UIを返す。"""
     return render_template('index.html')
 
 
 @socketio.on("start")
 def start(data):
+    """Socket.IO経由でテーマを受け取り、LangGraphの進捗を逐次送信する。"""
     theme = data.get("theme", "")
 
     state = {

@@ -22,12 +22,12 @@ def _load_prompt(name: str) -> str:
 
 
 def _env_candidates(prefixes: Sequence[str], suffix: str) -> list[str]:
-    """Return possible env var names for the given prefixes and suffix."""
+    """接頭辞とサフィックスの組み合わせから、環境変数名の候補一覧を生成する。"""
     return [f"{prefix}_{suffix}" for prefix in prefixes]
 
 
 def _get_env_value(candidates: Sequence[str], label: str, required: bool = True) -> str | None:
-    """Return the first non-empty env var among candidates or raise if required."""
+    """候補群から最初に見つかった環境変数値を返し、必須指定なら未設定時に例外を投げる。"""
     for name in candidates:
         value = os.getenv(name)
         if value:
@@ -40,7 +40,7 @@ def _get_env_value(candidates: Sequence[str], label: str, required: bool = True)
 
 
 def _build_azure_llm(*prefixes: str) -> AzureChatOpenAI:
-    """Create an AzureChatOpenAI instance using multiple possible env prefixes."""
+    """複数の接頭辞を許容しながらAzureChatOpenAIインスタンスを構築する。"""
     api_version = _get_env_value(
         ["API_VERSION", "AZURE_OPENAI_API_VERSION",
             "OPENAI_API_VERSION"], "Azure API version"
@@ -82,7 +82,7 @@ llm5_1 = _build_azure_llm("GPT_5_1", "GPT_5.1")
 
 
 def _to_text(value: Any) -> str:
-    """Normalize various LLM return shapes (list/dict/etc.) into a printable string."""
+    """LLMからの多様な返却形式（リスト/辞書など）を表示用の文字列に正規化する。"""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -137,6 +137,7 @@ class ArticleState(TypedDict):
 
 
 def generate_draft(state: ArticleState) -> dict:
+    """感情フックと構成の骨子を織り交ぜた初稿を生成する。"""
     system_prompt = SystemMessage(content=_load_prompt("draft_system.txt"))
     human_prompt_content = _load_prompt("draft_human.txt").format(
         theme=state["theme"]
@@ -148,6 +149,7 @@ def generate_draft(state: ArticleState) -> dict:
 
 
 def split_sections(state: ArticleState) -> dict:
+    """初稿をJSON形式で書き出し・本文・まとめに分割する。"""
     prompt_template = _load_prompt("split_sections.txt")
     prompt = prompt_template.format(article=state["draft"])
     res = llm5_mini.invoke(prompt).content
@@ -160,6 +162,7 @@ def split_sections(state: ArticleState) -> dict:
 
 
 def fact_check(state: ArticleState) -> dict:
+    """各セクションを厳密にファクトチェックし、指摘メモを蓄積する。"""
 
     notes = {}
     prompt_template = _load_prompt("fact_check.txt")
@@ -174,6 +177,7 @@ def fact_check(state: ArticleState) -> dict:
 
 
 def revise_sections(state: ArticleState) -> dict:
+    """ファクトチェック結果だけを反映し、構成を崩さずに本文を修正する。"""
     sections = {}
     prompt_template = _load_prompt("revise_sections.txt")
     for title, body in state["sections"].items():
@@ -187,6 +191,7 @@ def revise_sections(state: ArticleState) -> dict:
 
 
 def generate_diagrams(state: ArticleState) -> dict:
+    """各セクションの要点をMermaidフローチャートとして生成する。"""
     diagrams = {}
     prompt_template = _load_prompt("diagram.txt")
     for title, body in state["sections"].items():
@@ -198,6 +203,7 @@ def generate_diagrams(state: ArticleState) -> dict:
 
 
 def generate_seo_title(state: ArticleState) -> dict:
+    """SEOを意識したタイトルを生成し、記事本文の先頭に差し込む。"""
     prompt = _load_prompt("title.txt").format(
         theme=state["theme"],
         article=state["article"],
@@ -209,6 +215,7 @@ def generate_seo_title(state: ArticleState) -> dict:
 
 
 def merge_article(state: ArticleState) -> dict:
+    """磨き込んだセクションを無料/有料構成の本文へ統合する。"""
     order = ["書き出し", "本文", "まとめ"]
     sections = sorted(
         state["sections"].items(),
@@ -284,6 +291,7 @@ def merge_article(state: ArticleState) -> dict:
 
 
 def build_graph() -> StateGraph[ArticleState]:
+    """Socket.IOが利用するLangGraphパイプラインを構築してコンパイルする。"""
 
     graph = StateGraph(ArticleState)
 
