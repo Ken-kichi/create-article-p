@@ -179,7 +179,7 @@ cd ~/Desktop
 mkdir -p create-article && cd create-article
 uv init
 uv venv && source .venv/bin/activate
-uv add langchain langgraph langchain-openai openai tiktoken python-dotenv flask flask-socketio
+uv add langchain langgraph langchain-openai openai tiktoken python-dotenv flask flask-socketio eventlet gunicorn
 uv pip compile ./pyproject.toml > ./requirements.txt
 touch .env
 ```
@@ -926,6 +926,9 @@ C：文体・表現ルール（語尾・接続詞など）
 
 LangGraphが流す進捗情報をブラウザに届けるために、FlaskとSocket.IOをどう繋げるかを確認します。
 
+> **eventlet について**
+> App Service上のGunicornでは `--worker-class eventlet` を指定するため、`eventlet>=0.24.1` がインストールされていないと「class uri 'eventlet' invalid or not found」エラーになります。`uv add ... eventlet` で依存に含め、`requirements.txt` に固定しておいてください。
+
 `app.py` では `SocketIO(app, cors_allowed_origins="*")` を初期化し、`graph_app.stream(state, stream_mode=["updates","values"])` を逐次読みながら進捗を emit しています。`NODE_LABELS` に日本語を紐づけ、Zennライターにも分かりやすい表示にしました。
 
 ```python:app.py
@@ -1265,7 +1268,7 @@ az account set --subscription "<SUBSCRIPTION_NAME_OR_ID>"
 上記で課金対象サブスクリプションを明示したあと、Step 3で作成した `article-ai-rg` を再利用してApp Service PlanとWeb Appを構築します。
 
 ```bash
-az appservice plan create -g article-ai-rg -n article-plan --sku P1v3 --is-linux
+az appservice plan create -g article-ai-rg -n article-plan --sku B1 --is-linux
 az webapp create -g article-ai-rg -p article-plan -n article-ai-writer --runtime "PYTHON:3.11"
 ```
 
@@ -1277,13 +1280,46 @@ Flask-SocketIOはスレッドモードでも動きますが、App Serviceでは�
 gunicorn --worker-class eventlet --workers 1 --timeout 120 app:app
 ```
 
-Azure Portal > Web App > Configuration > General settings > Startup Command に貼り付けてください。
+Azure Portal > Web App > 設定 > 構成（プレビュー） > スタック設定タブ > スタートアップ コマンド に貼り付けてください。
 
 ### App Settings
 
-Portalまたは `az webapp config appsettings set` で `.env` のキーを投入します。`WEBSITES_PORT=8000`、`WEBSITES_CONTAINER_START_TIME_LIMIT=600` を入れておくと初回ブートが安定します。
+Portalまたは `az webapp config appsettings set` で `.env` のキーを投入します。ここで設定する値は、ローカルの `.env` と同じ内容に加えて、App Serviceの起動を安定させるための環境変数を含めます。
+
+- `WEBSITES_PORT=8000`
+  App Service（Linux コンテナ）がリッスンを期待するポート番号です。Flaskの内部ポートと合わせておくと、ヘルスチェックの失敗を防げます。
+- `WEBSITES_CONTAINER_START_TIME_LIMIT=600`
+  コンテナが起動完了するまでに許される秒数です。LLM依存の初回ロードで時間がかかる場合にタイムアウトしにくくなります。
+
+CLIでまとめて設定する場合は、以下のように `--settings` にキーと値を指定します。
+
+環境変数を単体で登録する場合
+```bash
+az webapp config appsettings set -n article-ai-writer -g create-article-p --settings API_VERSION=2024-05-01-preview
+```
+
+環境変数を複数で登録する場合
+```bash
+az webapp config appsettings set \
+  --name article-ai-writer \
+  --resource-group article-ai-rg \
+  --settings \
+    API_VERSION=2024-05-01-preview \
+    GPT_5_1_ENDPOINT=https://xxx.openai.azure.com \
+    GPT_5_1_DEPLOYMENT_NAME=gpt-5-1 \
+    GPT_5_1_SUBSCRIPTION_KEY=<your-key> \
+    GPT_5_MINI_ENDPOINT=https://xxx.openai.azure.com \
+    GPT_5_MINI_DEPLOYMENT_NAME=gpt-5-mini \
+    GPT_5_MINI_SUBSCRIPTION_KEY=<your-key> \
+    WEBSITES_PORT=8000 \
+    WEBSITES_CONTAINER_START_TIME_LIMIT=600
+```
+
+Portalから設定する場合は、App Service → 設定 → 環境変数 で「追加」を押し、同じキー/値を1つずつ追加すれば反映されます。
 
 ### デプロイ
+
+GitHubとの連携はCLIでもPortalでも設定できます。CLI派は下記のように `az webapp deployment source config` を使い、Portal派は Deployment Center のウィザードで同じ内容を設定します。
 
 GitHub Actionsを使う場合は `azure/webapps-deploy@v2` を利用し、`AZURE_WEBAPP_PUBLISH_PROFILE` をSecretに登録します。ローカルから直接デプロイするなら、
 
@@ -1292,6 +1328,19 @@ az webapp up --name article-ai-writer --resource-group article-ai-rg --runtime "
 ```
 
 を実行し、以降は `az webapp deployment source config-local-git` でGitプッシュ運用も可能です。
+
+GitHubリポジトリを直接紐付けるCLI例
+
+```bash
+az webapp deployment source config \
+  --name article-ai-writer \
+  --resource-group article-ai-rg \
+  --repo-url https://github.com/<user>/<repo> \
+  --branch main \
+  --manual-integration
+```
+
+Portalの場合は App Service → Deployment Center でGitHubを選び、リポジトリとブランチ、ビルド方法を選択して保存すれば同じ設定が完了します。
 
 ### ログと構成の最終確認
 
