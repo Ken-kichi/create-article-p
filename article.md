@@ -1,11 +1,17 @@
 # Azure App Service×LangGraphで収益化記事を量産する完全ガイド
 
-「LLMで記事を書きたいけれど、どのツールをどう繋げればいいか分からない」──そんな初心者エンジニアでも迷わず進められるように、LangGraph × Flask × Socket.IO × Azure OpenAI の組み合わせで有料記事のベースを自動生成するアプリを一から作っていきます。セットアップからAzure App Serviceへのデプロイ、本番運用の確認までを実装できるように構成しました。
+LLMを使った執筆は便利ですが、「プロンプトが長すぎて毎回貼り直す」「無料/有料の境界を忘れる」「クラウドに載せる方法がわからない」といった悩みがつきまといます。本記事では、LangGraph × Flask × Socket.IO × Azure OpenAI を組み合わせて、誰でも再利用できる“有料記事ベース生成アプリ”をゼロから作り、Azure App Serviceにデプロイするまでを解説します。ローカル開発、Azure AI Foundryでのモデル接続、App Serviceへの配置、動作確認、Zennでの公開までを一つのガイドにまとめました。
 
 
 ## 読者に刺さる記事を量産したい
 
-最近は「とりあえずChatGPTに聞いて書く」ケースが増えていますが、毎回同じ品質で無料／有料パートを作り分けるのは意外と難しいです。そこで本稿では、AIに役割を分担させて記事を組み立てる方法を紹介します。テーマと伝えたいことをフォームに入れるだけで、以下の流れが自動で進みます。
+最近は「とりあえずChatGPTに聞いて書く」ケースが増えていますが、毎回同じ品質で無料／有料パートを作り分けるのは意外と難しいです。そこで本稿では、AIに役割を分担させて記事を組み立てる方法を紹介します。ここで使う主な技術は次の3つです。
+
+- **LangGraph**：LangChainが提供するワークフローエンジン。ドラフト生成→ファクトチェック→リライト…のようにLLMノードをグラフ状に配置できます。
+- **Socket.IO**：ブラウザとサーバーの双方向通信ライブラリ。進捗率をリアルタイム更新するのに利用します。
+- **Azure AI Foundry**：Azure OpenAIのデプロイや接続をまとめて管理できるポータル。App Serviceから安全にLLMを呼び出すための中継役です。
+
+テーマと伝えたいことをフォームに入れるだけで、以下の流れが自動で進みます。
 
 1. ドラフト生成（読者課題と感情フックを含んだ骨子）
 2. 見出しごとの分割とJSON化
@@ -21,6 +27,8 @@ Azure App Serviceにデプロイすれば、チームメンバーがURLを開く
 
 ## この記事で学べること
 
+このガイドを最後まで実施すると、LangGraphベースの生成フローを理解し、ローカルで試したあとAzureに載せてZennで公開するまでの工程を一気通貫で体験できます。主に以下のスキルを取り上げます。
+
 - LangGraphを使って「下書き→ファクトチェック→リライト→図解→統合→タイトル」の一連フローを組む方法
 - Flask + Socket.IOでブラウザの進捗UIとLangGraphを連携させる方法
 - Azure OpenAIのデプロイと環境変数設定、Azure AI Foundryでの確認方法
@@ -30,9 +38,46 @@ Azure App Serviceにデプロイすれば、チームメンバーがURLを開く
 
 ---
 
+## LangGraphのワークフローを理解する
+
+LangGraphでは、記事生成に必要な処理をノードとして定義し、`StateGraph` 上で順番に実行します。`graph.py` では以下のようなノード構成になっています。
+
+```mermaid
+flowchart LR
+  Draft([draft\n下書き生成])
+  Split([split\n構成分割])
+  Fact([fact\nファクトチェック])
+  Revise([revise\n指摘反映])
+  Diagram([diagram\n図解生成])
+  Merge([merge\n本文統合])
+  Title([title\nSEOタイトル])
+
+  Draft --> Split --> Fact --> Revise --> Diagram --> Merge --> Title
+```
+
+各ノードでは `ArticleState` という辞書形式の状態を受け取り、一部のキーを更新して次に渡します。重要なポイントは次の通りです。
+
+1. **draft**
+   `prompts/draft_system.txt` と `draft_human.txt` を読み込み、テーマから骨子となる下書きを作成します。ここで無料/有料パートの差別化を意識した文章を生成します。
+2. **split**
+   下書きを JSON 形式で「書き出し」「本文」「まとめ」に分割します。LangGraphの状態には `sections` キーとして保存されます。
+3. **fact / revise**
+   `fact` で各セクションをファクトチェックし、指摘メモを `notes` に保持。`revise` で指摘内容だけを取り入れて文章を整えます。LLMが暴走しないよう、ノードを分けて逐次制御しています。
+4. **diagram**
+   セクションの内容からMermaid図を生成し、`diagrams` に格納します。図は `merge` ノードでコードブロックとして挿入されます。
+5. **merge / title**
+   `merge` で無料／有料パートを持つMarkdown本文を組み立て、`title` でSEOタイトルを生成して本文の先頭に差し替えます。
+
+`graph_app.stream(state, stream_mode=["updates","values"])` により、各ノードが完了するたびに部分的な更新がFlaskへ通知され、Socket.IOの進捗ログに反映される仕組みです。LangGraphを使うことで、「どの工程が終わったか」「どのデータがどこで更新されたか」を明示的に追えるため、初心者でもワークフロー全体を理解しやすくなります。
+
+---
+
 ## 実装とデプロイの前提条件
 
+ここから先は手を動かしながら進めます。必要なアカウントや開発環境が揃っていないと途中で止まってしまうので、まずは以下のチェックリストを満たしているか確認してください。
+
 - **Azureアカウント**：OpenAIリソースを作成できるサブスクリプション（Standard tier以上）とApp Service Planを起動できるRBAC権限。
+- **Azureの初期設定**：[Azureサブスクリプションの作成手順](https://learn.microsoft.com/azure/cost-management-billing/manage/create-subscription) と [Azure OpenAIリソース作成手順](https://learn.microsoft.com/azure/ai-services/openai/how-to/create-resource) を一度通読し、権限とリージョンを確認してください。
 - **ローカル環境**：macOS / Linux / WSL2 上の Python 3.11、`uv`、`node`/`npm`（Mermaid CLI検証用）、`az` CLI、`git`。
 - **Azure CLI拡張**：`az extension add --name webapp`、OpenAIを操作する場合は `az extension add --name azure-ai-ml` も入れておく。
 - **ネットワーク**：社内プロキシがある場合は `HTTPS_PROXY` を設定し、Socket.IOのポーリングが塞がれていないか確認。
@@ -42,54 +87,106 @@ Azure App Serviceにデプロイすれば、チームメンバーがURLを開く
 
 ---
 
-## 本文：アーキテクチャと開発フローの全体像
+## アーキテクチャと開発フローの全体像
 
-### 1. コンポーネントシーケンス
+全体像を把握しておくと、コードを読むときに「どのレイヤーで何が起きているか」がわかりやすくなります。インフラ構成と、ブラウザ～Azure AI Foundry間のデータの流れを先に整理しておきましょう。
+
+### 1. インフラ／アプリ構成図
+
+まずはどのコンポーネントがどこに配置され、どのサービスが役割分担しているかを図で押さえておきましょう。
+
+```mermaid
+flowchart LR
+  subgraph Client["ブラウザ<br>（テーマ入力/進捗UI）"]
+    UI["templates/index.html"]
+  end
+
+  subgraph AppService["Azure App Service<br>（Flask + Socket.IO）"]
+    Socket[app.py Socket.IO]
+    Static[static/app.js]
+  end
+
+  subgraph LangGraphRuntime["LangGraph Runtime<br>（graph.py）"]
+    Draft[draft]
+    Split[split]
+    Fact[fact]
+    Revise[revise]
+    Diagram[diagram]
+    Merge[merge]
+    Title[title]
+  end
+
+  subgraph Foundry["Azure AI Foundry（OpenAIデプロイ）"]
+    GPT51[gpt-5.1]
+    GPT5mini[gpt-5-mini]
+  end
+
+  UI -- HTTPS/Socket.IO --> Socket
+  Socket -- 状態管理 --> LangGraphRuntime
+  LangGraphRuntime -- API呼び出し --> Foundry
+  Foundry -- 応答JSON --> LangGraphRuntime
+  Socket -- 完成Markdown --> UI
+```
+
+- **Azure App Service**：Flask + Socket.IOアプリをホストし、HTTPSでブラウザと通信。`app.py` から LangGraph runtime を呼び出します。
+- **LangGraph Runtime**：App Service内で `graph.py` を実行し、各ノードの状態をローカルメモリで保持。
+- **Azure AI Foundry**：Azure OpenAIの `gpt-5.1` / `gpt-5-mini` デプロイをまとめて管理。LangGraphの各ノードは Foundry のエンドポイントを通じて推論を行います。
+
+### 2. データのやり取り（シーケンス）
+
+次に、ブラウザからAzure AI Foundryまでのリクエストがどの順番で流れるのかをシーケンス図で確認します。
 
 ```mermaid
 sequenceDiagram
   participant User as ユーザー
   participant Browser as ブラウザ(UI)
-  participant Flask as Flask+Socket.IO
+  participant AppService as Azure App Service
   participant LangGraph as LangGraph(Runtime)
-  participant Azure as Azure OpenAI
+  participant Foundry as Azure AI Foundry
 
   User->>Browser: テーマ入力＆生成開始
-  Browser->>Flask: Socket.IO emit("start", theme)
-  Flask->>LangGraph: graph_app.stream(state)
-  loop Node pipeline
-    LangGraph->>Azure: LLM call (draft/fact/revise/diagram/title)
-    Azure-->>LangGraph: 応答
-    LangGraph-->>Flask: updates (ノード完了イベント)
-    Flask-->>Browser: socket emit("progress", msg, percent)
+  Browser->>AppService: Socket.IO emit("start", theme)
+  AppService->>LangGraph: graph_app.stream(state)
+  loop ノード処理
+    LangGraph->>Foundry: LLM呼び出し (draft/fact/revise/diagram/title)
+    Foundry-->>LangGraph: 推論結果(JSON)
+    LangGraph-->>AppService: updates(ノード名/結果)
+    AppService-->>Browser: socket emit("progress", msg, percent)
   end
-  LangGraph-->>Flask: 完成記事/タイトル
-  Flask-->>Browser: socket emit("done", article)
+  LangGraph-->>AppService: 完成記事 + SEOタイトル
+  AppService-->>Browser: socket emit("done", article, 100%)
   Browser-->>User: Markdown表示・コピー
 ```
 
 - **フロント**：`templates/index.html` と `static/app.js` でテーマ入力、リアルタイム進捗、完成記事コピーを実装。
 - **バックエンド**：Flask + Flask-SocketIOがLangGraphのストリームを仲介し、各ノード完了時に進捗率をpush。
-- **LLM層**：`graph.py`がAzure OpenAIのデプロイ（`GPT_5_1_*`, `GPT_5_MINI_*`）に接続。環境変数は `_build_azure_llm` 内で複数プリフィックスを許容し、Azure PortalのApp Settingsと相性が良い。
+- **LLM層**：`graph.py` が Azure AI Foundry で発行した Azure OpenAI デプロイ（`GPT_5_1_*`, `GPT_5_MINI_*`）に接続。環境変数は `_build_azure_llm` 内で複数プリフィックスを許容し、App Service の App Settings から読み込みます。
 
 ここまでは設計の考え方。具体的な実装・運用手順は有料パートで詳解します。**無料パートで得られるのは全体像まで**。これ以降で、実際のコード配置、LLMプロンプトの管理、Azure App Serviceでの起動コマンド、SLAを守るための監視ログ設定を開示します。
 
 ---
 
-## 本文：Azureで動かす実装チュートリアル（ここから有料）
+## Azureで動かす実装チュートリアル
 
-### Step 0. リポジトリと仮想環境
+ここからは実際のコマンドとコードを示しながら、ローカル実装→Azure設定→デプロイまでを進めます。各ステップは独立しているので、途中で詰まった場合は該当箇所だけ繰り返し確認できます。
+
+## リポジトリと仮想環境
+
+ここではプロジェクトの土台となるディレクトリとPython環境をDesktopに初期化し、依存関係を整えます。
 
 ```bash
+cd ~/Desktop
+mkdir -p create-article && cd create-article
+uv init
 uv venv && source .venv/bin/activate
 uv add langchain langgraph langchain-openai openai tiktoken python-dotenv flask flask-socketio
 uv pip compile ./pyproject.toml > ./requirements.txt
-cp .env.example .env  # ファイルは記事内で配布
+touch .env
 ```
 
 `requirements.txt` は `uv pip compile` で作成済みなので、そのまま `uv pip sync requirements.txt` すればFlask・LangGraph・langchain-openai・Flask-SocketIOまで整います。Python3.11以上を前提にしています。
 
-#### pyproject.tomlの最低構成
+### pyproject.tomlの最低構成
 
 ```toml:pyproject.toml
 [project]
@@ -112,7 +209,7 @@ python = "3.11"
 
 `uv add ...` を実行すると上記依存が追記され、`uv pip compile` でロックされた `requirements.txt` が生成されます。
 
-#### 前提になるファイルツリー
+### 前提になるファイルツリー
 
 ```text
 create-article-p/
@@ -126,9 +223,9 @@ create-article-p/
 └─ .env (手元で作成)
 ```
 
-クローン直後は `cp env.sample .env`（本記事付録）で環境ファイルを作り、`flask --app app run --debug` を叩けばブラウザで `http://127.0.0.1:5000` が開きます。
+初期化が完了したら `cp env.sample .env`（本記事付録）で環境ファイルを作り、`flask --app app run --debug` を叩けばブラウザで `http://127.0.0.1:5000` が開きます。
 
-#### .env.example
+### .env.example
 
 ```dotenv:.env.example
 FLASK_ENV=development
@@ -145,7 +242,9 @@ CORS=*
 
 環境ごとに `CORS` 値を変えることで、限定公開のフロントだけ許可するなどの制御ができます。Azure App Serviceでは同じ値を App Settings に転記してください。
 
-### Step 1. LangGraphの状態遷移を実装する
+## LangGraphの状態遷移を実装する
+
+続いて、記事生成の心臓部となるLangGraphのノード群を `graph.py` に実装していきます。
 
 `graph.py` の骨格は次の通りです。
 
@@ -174,12 +273,12 @@ def _load_prompt(name: str) -> str:
 
 
 def _env_candidates(prefixes: Sequence[str], suffix: str) -> list[str]:
-    """Return possible env var names for the given prefixes and suffix."""
+    """接頭辞とサフィックスの組み合わせから、環境変数名の候補一覧を生成する。"""
     return [f"{prefix}_{suffix}" for prefix in prefixes]
 
 
 def _get_env_value(candidates: Sequence[str], label: str, required: bool = True) -> str | None:
-    """Return the first non-empty env var among candidates or raise if required."""
+    """候補群から最初に見つかった環境変数値を返し、必須指定なら未設定時に例外を投げる。"""
     for name in candidates:
         value = os.getenv(name)
         if value:
@@ -192,7 +291,7 @@ def _get_env_value(candidates: Sequence[str], label: str, required: bool = True)
 
 
 def _build_azure_llm(*prefixes: str) -> AzureChatOpenAI:
-    """Create an AzureChatOpenAI instance using multiple possible env prefixes."""
+    """複数の接頭辞を許容しながらAzureChatOpenAIインスタンスを構築する。"""
     api_version = _get_env_value(
         ["API_VERSION", "AZURE_OPENAI_API_VERSION",
             "OPENAI_API_VERSION"], "Azure API version"
@@ -234,7 +333,7 @@ llm5_1 = _build_azure_llm("GPT_5_1", "GPT_5.1")
 
 
 def _to_text(value: Any) -> str:
-    """Normalize various LLM return shapes (list/dict/etc.) into a printable string."""
+    """LLMからの多様な返却形式（リスト/辞書など）を表示用の文字列に正規化する。"""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -289,6 +388,7 @@ class ArticleState(TypedDict):
 
 
 def generate_draft(state: ArticleState) -> dict:
+    """感情フックと構成の骨子を織り交ぜた初稿を生成する。"""
     system_prompt = SystemMessage(content=_load_prompt("draft_system.txt"))
     human_prompt_content = _load_prompt("draft_human.txt").format(
         theme=state["theme"]
@@ -300,6 +400,7 @@ def generate_draft(state: ArticleState) -> dict:
 
 
 def split_sections(state: ArticleState) -> dict:
+    """初稿をJSON形式で書き出し・本文・まとめに分割する。"""
     prompt_template = _load_prompt("split_sections.txt")
     prompt = prompt_template.format(article=state["draft"])
     res = llm5_mini.invoke(prompt).content
@@ -312,6 +413,7 @@ def split_sections(state: ArticleState) -> dict:
 
 
 def fact_check(state: ArticleState) -> dict:
+    """各セクションを厳密にファクトチェックし、指摘メモを蓄積する。"""
 
     notes = {}
     prompt_template = _load_prompt("fact_check.txt")
@@ -326,6 +428,7 @@ def fact_check(state: ArticleState) -> dict:
 
 
 def revise_sections(state: ArticleState) -> dict:
+    """ファクトチェック結果だけを反映し、構成を崩さずに本文を修正する。"""
     sections = {}
     prompt_template = _load_prompt("revise_sections.txt")
     for title, body in state["sections"].items():
@@ -339,6 +442,7 @@ def revise_sections(state: ArticleState) -> dict:
 
 
 def generate_diagrams(state: ArticleState) -> dict:
+    """各セクションの要点をMermaidフローチャートとして生成する。"""
     diagrams = {}
     prompt_template = _load_prompt("diagram.txt")
     for title, body in state["sections"].items():
@@ -350,6 +454,7 @@ def generate_diagrams(state: ArticleState) -> dict:
 
 
 def generate_seo_title(state: ArticleState) -> dict:
+    """SEOを意識したタイトルを生成し、記事本文の先頭に差し込む。"""
     prompt = _load_prompt("title.txt").format(
         theme=state["theme"],
         article=state["article"],
@@ -361,6 +466,7 @@ def generate_seo_title(state: ArticleState) -> dict:
 
 
 def merge_article(state: ArticleState) -> dict:
+    """磨き込んだセクションを無料/有料構成の本文へ統合する。"""
     order = ["書き出し", "本文", "まとめ"]
     sections = sorted(
         state["sections"].items(),
@@ -436,6 +542,7 @@ def merge_article(state: ArticleState) -> dict:
 
 
 def build_graph() -> StateGraph[ArticleState]:
+    """Socket.IOが利用するLangGraphパイプラインを構築してコンパイルする。"""
 
     graph = StateGraph(ArticleState)
 
@@ -459,11 +566,13 @@ def build_graph() -> StateGraph[ArticleState]:
 
     return graph.compile()
 
+
 ```
 
 各ノードでは `prompts/*.txt` に外だしした指示を読み込みます。記事生成でよくある「プロンプト肥大化」を避け、Gitで差分を追いやすくするためです。`fact_check` → `revise_sections` による二段構えで、有料記事特有の厳しめなファクトチェックにも耐える文章が返ってきます。Mermaid図を出す `diagram` ノードは丸括弧禁止などの制約を課し、Zennのリッチプレビューでも崩れないようにしています。
 
-#### 図解のプロンプト
+## 各プロンプトを作成
+### 図解のプロンプト
 ```txt:prompts/diagram.txt
 以下の文章の内容を整理し、理解を助けるMermaid図を1つ作成してください。
 
@@ -485,7 +594,7 @@ def build_graph() -> StateGraph[ArticleState]:
 
 ```
 
-#### ドラフトのユーザープロンプト
+### ドラフトのユーザープロンプト
 ```txt:prompts/draft_human.txt
 「{theme}」というテーマで、有料note向けの記事草稿を作成してください。
 
@@ -576,7 +685,7 @@ C：文体・表現ルール（語尾・接続詞など）
 - コメント誘導では「どの項目で詰まったか」を具体的に尋ねる
 
 ```
-#### ドラフトのシステムプロンプト
+### ドラフトのシステムプロンプト
 ```txt:prompts/draft_system.txt
 あなたは**プロの編集者兼テクニカルライター**です。
 以下のルールを厳守し、読者にとって価値のある有料記事を生成してください。
@@ -719,7 +828,7 @@ C：文体・表現ルール（語尾・接続詞など）
 
 ```
 
-#### ファクトチェックを反映するプロンプト
+### ファクトチェックを反映するプロンプト
 ```txt:prompts/revise_sections.txt
 以下の本文を、直後のファクトチェック結果に基づいて修正してください。
 
@@ -746,7 +855,7 @@ C：文体・表現ルール（語尾・接続詞など）
 
 ```
 
-#### 見出しで分割するプロンプト
+### 見出しで分割するプロンプト
 ```txt:prompts/split_sections.txt
 以下の記事を、内容は変更せず、見出し単位で分割してください。
 
@@ -778,7 +887,7 @@ C：文体・表現ルール（語尾・接続詞など）
 
 ```
 
-#### タイトルのプロンプト
+### タイトルのプロンプト
 ```txt:prompts/title.txt
 以下の情報をもとに、note向けのSEO最適化タイトルを1つ作成してください。
 
@@ -813,7 +922,9 @@ C：文体・表現ルール（語尾・接続詞など）
 >
 > 進捗が止まる場合は `graph_app.stream` の例外を `app.logger.exception` が拾うので、ターミナル出力を確認してください。
 
-### Step 2. フロントとSocket.IOの接着
+## フロントとSocket.IOの接着
+
+LangGraphが流す進捗情報をブラウザに届けるために、FlaskとSocket.IOをどう繋げるかを確認します。
 
 `app.py` では `SocketIO(app, cors_allowed_origins="*")` を初期化し、`graph_app.stream(state, stream_mode=["updates","values"])` を逐次読みながら進捗を emit しています。`NODE_LABELS` に日本語を紐づけ、Zennライターにも分かりやすい表示にしました。
 
@@ -840,11 +951,13 @@ TOTAL_STEPS = len(NODE_LABELS)
 
 @app.route('/')
 def index():
+    """トップページを描画し、記事生成UIを返す。"""
     return render_template('index.html')
 
 
 @socketio.on("start")
 def start(data):
+    """Socket.IO経由でテーマを受け取り、LangGraphの進捗を逐次送信する。"""
     theme = data.get("theme", "")
 
     state = {
@@ -890,7 +1003,7 @@ if __name__ == '__main__':
 
 ```
 
-#### HTMLの実装
+### HTMLの実装
 ```html:templates/index.html
 <!doctype html>
 <html lang="ja">
@@ -978,9 +1091,10 @@ if __name__ == '__main__':
 
 `static/app.js` 側では `socket.emit("start", { theme })` を発火し、進捗バー・ログ・コピー制御を司ります。特にコピー機能は `navigator.clipboard.writeText` で実装し、生成直後にZennのエディタへ貼り付けられるようにしています。
 
-#### JavaScriptの実装
+### JavaScriptの実装
 ```js:static/app.js
 $(function () {
+  /** Socket.IOとDOM要素を初期化し、記事生成UIを制御する即時関数。 */
   const socket = io();
   const $start = $("#start");
   const $spinner = $("#spinner");
@@ -989,6 +1103,10 @@ $(function () {
   const $article = $("#article");
   const $copyButton = $("#copy-article");
 
+  /**
+   * ローディング状態を切り替え、ボタンとスピナーの表示を更新する。
+   * @param {boolean} isLoading - trueなら処理中としてUIをロックする
+   */
   function setLoading(isLoading) {
     if (isLoading) {
       $spinner.removeClass("d-none");
@@ -999,6 +1117,10 @@ $(function () {
     }
   }
 
+  /**
+   * 進捗率を0〜100の範囲に正規化し、プログレスバーへ反映する。
+   * @param {number} rawPercent - サーバーから渡される生の進捗値
+   */
   function updateProgress(rawPercent) {
     const percent = Math.max(0, Math.min(100, rawPercent ?? 0));
     $progressBar
@@ -1008,10 +1130,15 @@ $(function () {
     $progressLabel.text(`${percent}%`);
   }
 
+  /**
+   * 完成記事コピー用ボタンの有効/無効を切り替える。
+   * @param {boolean} enabled - trueでボタンを押下可能にする
+   */
   function setCopyEnabled(enabled) {
     $copyButton.prop("disabled", !enabled);
   }
 
+  /** テーマ入力から記事生成を開始するクリックハンドラ。 */
   $("#start").click(function () {
     $("#log").empty();
     $article.val("");
@@ -1024,6 +1151,7 @@ $(function () {
     });
   });
 
+  /** LangGraph進捗イベントを受信し、ログと進捗バーを更新する。 */
   socket.on("progress", function (data) {
     $("#log").append(
       `<li class="list-group-item">${data.msg}</li>`
@@ -1033,6 +1161,7 @@ $(function () {
     }
   });
 
+  /** 記事完成イベントを受信し、本文出力とUIリセットを行う。 */
   socket.on("done", function (data) {
     $("#log").append(
       `<li class="list-group-item list-group-item-success">完了</li>`
@@ -1043,6 +1172,7 @@ $(function () {
     setCopyEnabled(Boolean(data.article));
   });
 
+  /** エラー通知を受信した際、ログに表示しローディング状態を解除する。 */
   socket.on("failed", function (data) {
     $("#log").append(
       `<li class="list-group-item list-group-item-danger">${data.message}</li>`
@@ -1050,6 +1180,7 @@ $(function () {
     setLoading(false);
   });
 
+  /** 完成した記事をクリップボードへコピーするクリックハンドラ。 */
   $copyButton.click(async function () {
     const text = ($article.val() || "").trim();
     if (!text) {
@@ -1068,6 +1199,7 @@ $(function () {
   });
 });
 
+
 ```
 
 UI編集のポイント
@@ -1076,7 +1208,15 @@ UI編集のポイント
 - `static/app.js` の `updateProgress` で進捗バーの色を閾値で切り替えれば、生成詰まりを視覚化できます。
 - Socket.IOの名前空間を分けたい場合は `const socket = io("/writer"); app.py 側で namespace="/writer"` を追加してください。
 
-### Step 3. Azure OpenAIの設定と環境変数
+## Azure OpenAIの設定と環境変数
+
+LLM呼び出しを安定させるために、Azure OpenAI（Azure AI Foundry）側のデプロイと環境変数の準備を行います。ここで作成するリソースグループを、後続のApp Serviceでも使い回します。
+
+```bash
+az group create -n article-ai-rg -l japaneast
+```
+
+上のコマンドで `article-ai-rg` を作成したら、Azure Portalで同じリソースグループを指定してAI FoundryハブやOpenAIリソースを配置します。
 
 Azure Portalで以下を作成します。
 
@@ -1098,7 +1238,7 @@ GPT_5_MINI_SUBSCRIPTION_KEY=******
 
 `graph.py` の `_build_azure_llm` は `GPT_5_1_MODEL` 等も受け付けるため、モデル名を固定したい場合は追加設定してください。
 
-#### Azure PortalでAzure AI Foundry経由のデプロイを行う
+### Azure PortalでAzure AI Foundry経由のデプロイを行う
 
 1. **ハブとプロジェクトの作成**
    Azure Portalで「Azure AI Foundry」を検索し、「＋ 作成」を押してハブを作ります（リージョンはOpenAIリソースと合わせる）。続いてハブ内で「Create project」を選択し、`zenn-article-writer` のようなプロジェクト名で作成します。
@@ -1111,24 +1251,25 @@ GPT_5_MINI_SUBSCRIPTION_KEY=******
 5. **動作確認**
    プロジェクト上部の「Playground」でデプロイを選び、簡単な質問を投げて応答が返るか確認してからローカルアプリに組み込むとトラブルを減らせます。
 
-### Step 4. Azure App Serviceでのデプロイ
+## Azure App Serviceでのデプロイ
 
-#### 4-1. インフラ準備
+ローカルで動いたアプリをクラウドに常駐させるため、App Service上にインフラを構築して配置します。
+
+### インフラ準備
 
 ```bash
 az login
 az account set --subscription "<SUBSCRIPTION_NAME_OR_ID>"
 ```
 
-上記で課金対象サブスクリプションを明示したあと、リソースグループとApp Service Planを用意します。
+上記で課金対象サブスクリプションを明示したあと、Step 3で作成した `article-ai-rg` を再利用してApp Service PlanとWeb Appを構築します。
 
 ```bash
-az group create -n article-prod-rg -l japaneast
-az appservice plan create -g article-prod-rg -n article-plan --sku P1v3 --is-linux
-az webapp create -g article-prod-rg -p article-plan -n article-ai-writer --runtime "PYTHON:3.11"
+az appservice plan create -g article-ai-rg -n article-plan --sku P1v3 --is-linux
+az webapp create -g article-ai-rg -p article-plan -n article-ai-writer --runtime "PYTHON:3.11"
 ```
 
-#### 4-2. スタートアップコマンド
+### スタートアップコマンド
 
 Flask-SocketIOはスレッドモードでも動きますが、App Serviceでは以下のコマンドを推奨します。
 
@@ -1138,26 +1279,26 @@ gunicorn --worker-class eventlet --workers 1 --timeout 120 app:app
 
 Azure Portal > Web App > Configuration > General settings > Startup Command に貼り付けてください。
 
-#### 4-3. App Settings
+### App Settings
 
 Portalまたは `az webapp config appsettings set` で `.env` のキーを投入します。`WEBSITES_PORT=8000`、`WEBSITES_CONTAINER_START_TIME_LIMIT=600` を入れておくと初回ブートが安定します。
 
-#### 4-4. デプロイ
+### デプロイ
 
 GitHub Actionsを使う場合は `azure/webapps-deploy@v2` を利用し、`AZURE_WEBAPP_PUBLISH_PROFILE` をSecretに登録します。ローカルから直接デプロイするなら、
 
 ```bash
-az webapp up --name article-ai-writer --resource-group article-prod-rg --runtime "PYTHON:3.11"
+az webapp up --name article-ai-writer --resource-group article-ai-rg --runtime "PYTHON:3.11"
 ```
 
 を実行し、以降は `az webapp deployment source config-local-git` でGitプッシュ運用も可能です。
 
-#### 4-5. ログと構成の最終確認
+### ログと構成の最終確認
 
 ```bash
-az webapp log config -n article-ai-writer -g article-prod-rg --application-logging filesystem --level information
-az webapp restart -n article-ai-writer -g article-prod-rg
-az webapp log tail -n article-ai-writer -g article-prod-rg
+az webapp log config -n article-ai-writer -g article-ai-rg --application-logging filesystem --level information
+az webapp restart -n article-ai-writer -g article-ai-rg
+az webapp log tail -n article-ai-writer -g article-ai-rg
 ```
 
 `log tail` の出力に `Engine.IO connection established` が現れればSocket.IOが問題なく動作しています。もし `ValueError: not enough values to unpack` などが出る場合は、`requirements.txt` を再アップロードしてから再起動してください。
@@ -1187,13 +1328,17 @@ jobs:
 
 SecretsにはPortalからダウンロードした発行プロファイルXMLをそのまま貼り付けます。
 
-### Step 5. 健康監視と運用
+## 健康監視と運用
+
+デプロイ後に安定稼働させるためのログ監視やスケール計画、提供物の管理手順を整理します。
 
 - **ログ**：App Serviceの「ログストリーム」でSocket.IO接続状況を監視。`app.logger.exception` の出力で失敗原因が把握できます。
 - **スケール**：P1v3なら1,000req/日程度でも余裕。夜間のみスケールインする場合は自動スケールルールを設定。
 - **コスト管理**：Azure OpenAIのUsage + App Service Planで月1万円前後。トラフィックが増えたらFront Doorでキャッシュし、記事生成をジョブ化する運用も紹介テンプレに含めています。
 
 ### 購入者限定テンプレート
+
+購読者に追加価値を提供するためのテンプレート類と、その活用イメージをまとめました。
 
 | 提供物 | 形式 | 使い道 |
 | --- | --- | --- |
@@ -1203,18 +1348,28 @@ SecretsにはPortalからダウンロードした発行プロファイルXMLを�
 
 ---
 
-### Step 6. 動作確認とトラブルシューティング
+## 動作確認とトラブルシューティング
+
+ローカル・本番の両方でチェックすべきポイントと、よくあるエラーへの対処をここで確認しておきます。
 
 1. **ローカル検証**
    `python app.py` 起動 → ブラウザでテーマ投入 → 開発者ツールのNetworkタブで `socket.io/?EIO=4` が101（WebSocket）になるか確認。CORSで弾かれる場合は `SocketIO(..., cors_allowed_origins=os.getenv("CORS", "*"))` などに差し替える。
 2. **Azure上での疎通確認**
    `https://article-ai-writer.azurewebsites.net/socket.io/?EIO=4&transport=polling` に `curl` すると `{"sid":...}` が返る。返らない場合はApp Serviceのアクセス制限やVNET統合を疑う。
 3. **LLM呼び出し失敗時**
-   Portal > Monitor > Logs で `AzureDiagnostics | where Category == "FunctionAppLogs"` を確認し、`401`/`429` が出ていないかをチェック。料金対策として `gpt-5-mini` のみで全ノードを動かすバックアップ設定を付録コードに含めています。
+   Portal > Monitor > Logs で `AzureDiagnostics | where Category == "FunctionAppLogs"` を確認します。以下のようなログが出たらそれぞれの対処を行ってください。
+
+   | ログ例 | 典型原因 | 対処 |
+   | --- | --- | --- |
+   | `401 Unauthorized: invalid subscription key` | App Settingsのキーが誤り/反映漏れ | `GPT_5_1_SUBSCRIPTION_KEY` などの値を再貼付し、App Serviceを再起動 |
+   | `429 Too Many Requests` | Azure OpenAIのレート上限超過 | デプロイのTPSを引き上げる／`gpt-5-mini`中心に切り替える |
+   | `OperationNotAllowed: The resource is in a disabled status` | Azure OpenAIリソースが停止中 | Portalで状態を確認し、必要ならサポートに依頼 |
+
+   料金対策として `gpt-5-mini` のみでも動作するfallbackを `graph.py` に用意しておくと安心です。
 4. **Zenn投稿前テスト**
    `article.md` のMermaidを `npx @mermaid-js/mermaid-cli -i article.md -o /tmp/diag` で静的レンダリングし、構文エラーを早期発見できます。
 
-#### デプロイ完了チェックリスト
+### デプロイ完了チェックリスト
 
 - [ ] `https://article-ai-writer.azurewebsites.net` にアクセスし、テーマ入力→生成→コピーまでの流れが 2 回以上成功する
 - [ ] Azure Portal > App Service > Configuration に `.env` と同じキーが揃っている
@@ -1222,7 +1377,18 @@ SecretsにはPortalからダウンロードした発行プロファイルXMLを�
 - [ ] スケール設定（最小/最大インスタンス数、メモリ警告）が期待通り
 - [ ] Zenn用の有料テンプレ（スプレッドシート等）を配布ストレージへアップロード済み
 
+### Zennでの有料公開手順（概要）
+
+生成した記事をZennで販売する際の流れをざっくり把握し、公開直前で迷わないようにします。
+
+1. `article.md` をZennの「新しい記事を書く」に貼り付け、無料／有料境界の記述が崩れていないかプレビューする。
+2. 有料部分に添付するテンプレートリンク（Google Drive/Notionなど）は、購読者のみアクセスできる共有設定に変更しておく。
+3. タイトル・タグ・価格（例：1,000円）を設定し、サムネイルや導入文を整えたら「公開」をクリック。
+4. 公開後はコメント欄で「どの工程で詰まったか」をヒアリングし、次回のテンプレート改善に活かす。
+
 ### ChatGPT単体で書く場合との比較
+
+最後に、ChatGPTだけで執筆する場合との違いを整理し、本アプリの強みを再確認します。
 
 | 観点 | ChatGPTブラウザ利用 | 本アプリ（LangGraph + Azure App Service） |
 | --- | --- | --- |
@@ -1236,5 +1402,7 @@ SecretsにはPortalからダウンロードした発行プロファイルXMLを�
 頻繁に構成やテンプレを変えたい場合はChatGPTでも十分ですが、「Zenn向けの有料記事を安定的に量産し、チームで同じ品質基準を維持したい」という要件なら、本アプリのようにLangGraphで工程を固定化する方が再現性と差別化に繋がります。
 
 ## まとめ：Azure運用でブレない記事生成体制をつくる
+
+最後に、本記事で組み上げた内容と今後の展開を振り返ります。作業を一通り終えたら、手元の運用やZenn公開にどう組み込むかをイメージしてみてください。
 
 この記事では、LangGraphを軸にした記事生成アプリをAzure App Service上で動かす具体的な手順を共有しました。無料パートでは設計思想と全体像を、以降ではコード・インフラ設定・運用テンプレを一気通貫で示しています。Rさんと同じく「毎週の執筆を安定稼働させたい」読者は、環境構築からZenn公開までを一度通し、学習曲線を一気に崩してみてください。
