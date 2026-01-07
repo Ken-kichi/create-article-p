@@ -30,7 +30,6 @@ Azure App Serviceにデプロイすれば、チームメンバーがURLを開く
 
 ChatGPT単体で手作業だった工程を、LangChainとLangGraphで固定化し、誰でも再現できる形に落とし込みます。
 
----
 
 ## この記事で学べること
 
@@ -45,7 +44,6 @@ ChatGPT単体で手作業だった工程を、LangChainとLangGraphで固定化�
 - 有料記事公開に必要な無料/有料パートの作り分けの考え方
 
 
----
 
 ## LangGraphのワークフローを理解する
 
@@ -55,13 +53,13 @@ LangGraphでは、記事生成に必要な処理をノードとして定義し�
 
 ```mermaid
 flowchart LR
-  Draft([draft\n下書き生成])
-  Split([split\n構成分割])
-  Fact([fact\nファクトチェック])
-  Revise([revise\n指摘反映])
-  Diagram([diagram\n図解生成])
-  Merge([merge\n本文統合])
-  Title([title\nSEOタイトル])
+  Draft([draft<br>下書き生成])
+  Split([split<br>構成分割])
+  Fact([fact<br>ファクトチェック])
+  Revise([revise<br>指摘反映])
+  Diagram([diagram<br>図解生成])
+  Merge([merge<br>本文統合])
+  Title([title<br>SEOタイトル])
 
   Draft --> Split --> Fact --> Revise --> Diagram --> Merge --> Title
 ```
@@ -83,7 +81,6 @@ flowchart LR
 
 LangGraphを使うことで、「どの工程が終わったか」「どのデータがどこで更新されたか」を明示的に追えるため、初心者でもワークフロー全体を理解しやすくなります。
 
----
 
 ## 実装とデプロイの前提条件
 
@@ -97,7 +94,6 @@ LangGraphを使うことで、「どの工程が終わったか」「どのデ�
 
 これらが満たせない場合は、まずローカルで記事生成を動かし品質を確認してからAzure移行に進んでください。
 
----
 
 ## アーキテクチャと開発フローの全体像
 
@@ -176,7 +172,6 @@ sequenceDiagram
 
 ここまでは設計の考え方。具体的な実装・運用手順は有料パートで詳解します。**無料パートで得られるのは全体像まで**。これ以降で、実際のコード配置、LLMプロンプトの管理、Azure App Serviceでの起動コマンド、SLAを守るための監視ログ設定を開示します。
 
----
 
 ## Azureで動かす実装チュートリアル
 
@@ -1407,7 +1402,7 @@ SecretsにはPortalからダウンロードした発行プロファイルXMLを�
 | Azure App Service監視ダッシュボード | Workbook (ARM JSON) | CPU、Socket接続、LLM呼び出し失敗を可視化 |
 | 記事品質チェックリスト | Google Sheets共有リンク | 無料/有料境界、CTA、テンプレ挿入状況を1クリック確認 |
 
----
+
 
 ## 動作確認とトラブルシューティング
 
