@@ -576,7 +576,38 @@ def build_graph() -> StateGraph[ArticleState]:
 
 ```
 
-各ノードでは `prompts/*.txt` に外だしした指示を読み込みます。記事生成でよくある「プロンプト肥大化」を避け、Gitで差分を追いやすくするためです。`fact_check` → `revise_sections` による二段構えで、有料記事特有の厳しめなファクトチェックにも耐える文章が返ってきます。Mermaid図を出す `diagram` ノードは丸括弧禁止などの制約を課し、Zennのリッチプレビューでも崩れないようにしています。
+### 関数の説明
+
+#### プロンプト・環境変数まわり
+- `_load_prompt(name: str)`：`prompts/` 配下のテンプレートを読み込み、`lru_cache` で結果をキャッシュしてI/Oを最小化します。存在しない場合は即座に例外を投げ、デプロイ時の設定漏れを検知しやすくしています。
+- `_env_candidates(prefixes, suffix)`：`GPT_5_1_ENDPOINT` のようにプリフィックス＋サフィックスで命名される環境変数の候補をまとめて生成します。App Serviceとローカルで名前が揺れても吸収できるようにしています。
+- `_get_env_value(candidates, label, required=True)`：候補群を順に参照し、初めに見つかった環境変数の値を返します。必須の値が未定義なら分かりやすいラベル付き `RuntimeError` を送出します。
+- `_build_azure_llm(*prefixes)`：上記ユーティリティを組み合わせ、AzureChatOpenAIクライアントを生成します。モデル名は任意、エンドポイントやデプロイ名は複数プレフィックスに対応しており、`llm5_mini` / `llm5_1` の2種類をここから作っています。
+
+#### 出力整形ユーティリティ
+- `_to_text(value)`：LLM応答がリストや辞書でもMarkdownに貼り付けられるよう、改行や箇条書きに変換して文字列へ正規化します。
+- `_apply_seo_title(article, title)`：生成したSEOタイトルをMarkdownの先頭見出しとして差し替え、既存タイトルがあれば置き換え、なければ追加します。
+- `_sanitize_article(article)`：LLMが出力しがちな「結論：」「校正：」といったラベルを除去し、読者には不要な設計メモが本文に混ざらないようにします。
+
+#### LangGraphの状態とノード
+- `ArticleState`：テーマ、ドラフト、セクション、図、最終記事など、グラフ間で受け渡すキーを型情報付きで定義した `TypedDict` です。状態遷移を明示することで、Socket.IO経由で参照するデータの型崩れを防ぎます。
+- `generate_draft(state)`：`draft_system.txt` と `draft_human.txt` を組み合わせ、テーマから無料/有料の境界を意識した初稿を `llm5_mini` で生成します。
+- `split_sections(state)`：ドラフト全文を `split_sections.txt` に通し、「書き出し・本文・まとめ」のJSONを作成します。レスポンスから正規表現でJSONだけ抜き出し、`sections` に格納します。
+- `fact_check(state)`：各セクションを厳密なファクトチェッカーとしてLLMに再検証させ、指摘や裏付けを `notes` に積み上げます。信頼性を確保する検証ステップです。
+- `revise_sections(state)`：`notes` の指摘だけを取り込み、構成を崩さず文章を調整します。指摘がない場合は原文をそのまま保持します。
+- `generate_diagrams(state)`：セクション本文からMermaidフローチャートを生成し、ZennのMermaid仕様に合わせて丸括弧を角括弧へ差し替えます。結果は `diagrams` に保存します。
+- `merge_article(state)`：無料パートと有料パートを定型文込みでMarkdownへ統合し、必要に応じて図やCTA、付録リストを差し込みます。最後に `_sanitize_article` で不要ラベルを除去します。
+- `generate_seo_title(state)`：`title.txt` を用いてSEOキーワードを意識したタイトルを生成し、`_apply_seo_title` で本文冒頭に反映します。
+- `build_graph()`：`StateGraph` にノードを登録し、ドラフト→分割→ファクトチェック→リライト→図解→統合→タイトルの順でエッジを張って `graph.compile()` を返します。Flaskアプリはこのコンパイル済みグラフを `graph_app.stream` で利用しています。
+
+各ノードでは `prompts/*.txt` に外だしした指示を読み込みます。記事生成でよくある「プロンプト肥大化」を避け、Gitで差分を追いやすくしています。
+`fact_check` → `revise_sections` による二段構えで、有料記事特有の厳しめなファクトチェックにも耐える文章が返ってきます。
+Mermaid図を出す `diagram` ノードは丸括弧禁止などの制約を課し、図解をプレビューで見たときでも崩れないようにしています。
+
+### Flask × Socket.IO層の主要ファイル
+- `app.py`：FlaskアプリとFlask-SocketIOを初期化し、`build_graph()` でLangGraphを1度だけコンパイル。`/` ルートで `index.html` を返しつつ、`@socketio.on("start")` でテーマ入力を受信し、`graph_app.stream(..., ["updates","values"])` から届くノード結果を `progress`・`done`・`failed` イベントとしてブラウザへ送信します。`NODE_LABELS` と `TOTAL_STEPS` で進捗率計算も担保しています。
+- `templates/index.html`：Bootstrap 5のグリッドで「テーマ入力＋進捗UI」と「完成記事＋コピー」の2カラムを構成。`textarea#theme` には執筆ガイドをプレースホルダーで仕込み、`#progress-bar`/`#progress-label`/`#progress-log` で進捗を可視化します。右ペインの `textarea#article` と `#copy-article` ボタンが出力エリア、フッターでjQuery・Socket.IO・Bootstrap・`static/app.js` を読み込みUIスクリプトを有効化します。
+- `static/app.js`：DOM初期化時にSocket.IOクライアントを作り、`#start` クリックで `socket.emit("start", { theme })` を送信。`progress`/`done`/`failed` イベントを購読してプログレスバーやログ、コピー可否を更新し、`navigator.clipboard.writeText` で完成記事のコピーをサポートします。
 
 ## 各プロンプトを作成
 ### 図解のプロンプト
@@ -1012,6 +1043,10 @@ if __name__ == '__main__':
     socketio.run(app, debug=True)
 
 ```
+この `app.py` は Flask をHTTPサーバーに、Flask-SocketIOをリアルタイム通信レイヤーに据える最小構成にしています。
+アプリ起動時にLangGraphをコンパイルして `graph_app` として保持し、`NODE_LABELS` で各ノード名を日本語にマッピングしています。
+`/` ルートは単に `index.html` を返すだけですが、`@socketio.on("start")` で受け取るテーマをもとに初期 `ArticleState` を組み立て、`graph_app.stream(..., ["updates","values"])` から流れてくるノード完了イベントをそのまま `progress` イベントとしてブラウザへ送り返します。
+ループ終了時には `done` イベントで完成記事をEmitし、途中で例外が起きた場合は `failed` イベントとログ出力で原因を通知します。進捗率は `TOTAL_STEPS` 比で算出し、ユーザーにどの工程で止まったかを即座に示せるようになっています。
 
 ### HTMLの実装
 ```html:templates/index.html
@@ -1098,6 +1133,12 @@ if __name__ == '__main__':
 </html>
 
 ```
+
+`index.html` はBootstrap 5のカードレイアウトで構成されており、左ペインにテーマ入力・進捗UI・ログを集約、右ペインに完成記事の表示とコピー操作を配置しています。
+`textarea#theme` には5項目の入力ガイドをプレースホルダーで挿入し、読者情報や禁止表現を事前に書き込めるようにしています。
+進捗カードでは `#progress-bar` と `#progress-label`、折り畳み式の `#progress-log` を用意し、Socket.IOから渡された進行状況を随時描画できます。
+右側のカードは `textarea#article` を `flex-grow` で広げ、コピー用ボタン `#copy-article` とセットで記事の最終出力を扱います。
+フッターではjQuery・Socket.IO・BootstrapのCDNを読み込み、最後に `static/app.js` をバインドしてイベントハンドラを登録します。
 
 `static/app.js` 側では `socket.emit("start", { theme })` を発火し、進捗バー・ログ・コピー制御を司ります。特にコピー機能は `navigator.clipboard.writeText` で実装し、生成直後にZennのエディタへ貼り付けられるようにしています。
 
@@ -1211,6 +1252,11 @@ $(function () {
 
 
 ```
+
+`app.js` はDOMContentLoaded後に即実行される即時関数で、Socket.IOクライアントと主要DOM要素をキャッシュしつつ、UIの状態管理を担当します。
+`setLoading`・`updateProgress`・`setCopyEnabled` でボタンやプログレスバーを集中制御し、`#start` クリック時にログと記事欄をリセットして `socket.emit("start", { theme })` を送信します。
+サーバーからの `progress` イベントでリストと進捗率を更新し、`done` 受信時には本文を表示してコピー操作を解放、`failed` 受信時にはエラー文をログへ積んでローディングを解除します。
+コピー処理は `navigator.clipboard.writeText` を使い、成功/失敗に合わせてボタン文言を一時的に切り替えることでユーザーのフィードバックを強化しています。
 
 UI編集のポイント
 
@@ -1459,6 +1505,11 @@ SecretsにはPortalからダウンロードした発行プロファイルXMLを�
 
 ## まとめ：Azure運用でブレない記事生成体制をつくる
 
-最後に、本記事で組み上げた内容と今後の展開を振り返ります。作業を一通り終えたら、手元の運用やZenn公開にどう組み込むかをイメージしてみてください。
+ドラフト生成からSEOタイトル付けまでをLangGraphでノード化しておくと、「今どこで詰まっているのか？」をリアルタイムで追いかけられるので、書くたびに品質がぶれません。
+Azure OpenAIのデプロイを `_build_azure_llm` で切り替えつつApp Serviceに載せれば、チームメイトも同じフローで記事を量産できますし、`prompts/*.txt` にノウハウを集約しておけば後からの改善も怖くありません。
 
-この記事では、LangGraphを軸にした記事生成アプリをAzure App Service上で動かす具体的な手順を共有しました。無料パートでは設計思想と全体像を、以降ではコード・インフラ設定・運用テンプレを一気通貫で示しています。Rさんと同じく「毎週の執筆を安定稼働させたい」読者は、環境構築からZenn公開までを一度通し、学習曲線を一気に崩してみてください。
+この後は3ステップで一緒に進めてみましょう。
+1) 手元で `.env` を整えて `socketio.run(app)` を動かし、生成結果をZennの下書きに貼ってみる。
+2) App Serviceへデプロイして、ブラウザ上で進捗ログが流れる感覚を体験する。
+3) 有料テンプレや図解プロンプトを活用しながら本番の記事を1本公開し、コメントで届くフィードバックを `prompts/` や `ArticleState` の改良案に変える。
+ぜひ有料記事に挑戦してみてください！
